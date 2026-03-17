@@ -1,0 +1,451 @@
+name: Semoss Hotfix Image Builder
+
+# Manual workflow to build hotfix images from specific points in time
+# Allows pinning specific commits/branches across multiple repos to create
+# a stable hotfix image without incorporating recent dev changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: 'Target date (YYYY-MM-DD) for finding nearest ancestor commits if specific refs not provided'
+        required: false
+        type: string
+      base_image_tag:
+        description: 'Base image tag to fork from (e.g., 5.7.0-SNAPSHOT-ubuntu22-2024-03-15). Leave empty to build from scratch.'
+        required: false
+        type: string
+
+      # Repository-specific commit/branch references
+      semoss_ref:
+        description: 'Semoss repo commit/branch/tag (leave empty to use target_date)'
+        required: false
+        type: string
+      monolith_ref:
+        description: 'Monolith repo commit/branch/tag (leave empty to use target_date)'
+        required: false
+        type: string
+      semoss_ui_ref:
+        description: 'semoss-ui repo commit/branch/tag (leave empty to use target_date)'
+        required: false
+        type: string
+      semoss_artifacts_ref:
+        description: 'semoss-artifacts repo commit/branch/tag (leave empty to use target_date)'
+        required: false
+        type: string
+      bi_ref:
+        description: 'bi repo commit/branch/tag (leave empty to use target_date)'
+        required: false
+        type: string
+
+      # Hotfix metadata
+      hotfix_name:
+        description: 'Hotfix identifier (e.g., CVE-2024-1234, HOTFIX-AUTH-BUG)'
+        required: true
+        type: string
+      hotfix_description:
+        description: 'Brief description of what this hotfix addresses'
+        required: true
+        type: string
+
+      # Build options
+      push_to_registry:
+        description: 'Push to registry (uncheck for testing)'
+        required: false
+        type: boolean
+        default: true
+      use_cache:
+        description: 'Use Docker build cache'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: quay.io
+  IMAGE_REPO: semoss/semoss-hotfix
+
+jobs:
+  resolve-refs:
+    name: Resolve Repository References
+    runs-on: ubuntu-latest
+    outputs:
+      semoss_ref: ${{ steps.resolve.outputs.semoss_ref }}
+      semoss_sha: ${{ steps.resolve.outputs.semoss_sha }}
+      monolith_ref: ${{ steps.resolve.outputs.monolith_ref }}
+      monolith_sha: ${{ steps.resolve.outputs.monolith_sha }}
+      semoss_ui_ref: ${{ steps.resolve.outputs.semoss_ui_ref }}
+      semoss_ui_sha: ${{ steps.resolve.outputs.semoss_ui_sha }}
+      semoss_artifacts_ref: ${{ steps.resolve.outputs.semoss_artifacts_ref }}
+      semoss_artifacts_sha: ${{ steps.resolve.outputs.semoss_artifacts_sha }}
+      bi_ref: ${{ steps.resolve.outputs.bi_ref }}
+      bi_sha: ${{ steps.resolve.outputs.bi_sha }}
+      build_date: ${{ steps.resolve.outputs.build_date }}
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
+
+    steps:
+      - name: Checkout Semoss (for scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: SEMOSS/Semoss
+          path: semoss-main
+          fetch-depth: 0
+
+      - name: Resolve commit references
+        id: resolve
+        env:
+          TARGET_DATE: ${{ inputs.target_date }}
+          SEMOSS_REF: ${{ inputs.semoss_ref }}
+          MONOLITH_REF: ${{ inputs.monolith_ref }}
+          SEMOSS_UI_REF: ${{ inputs.semoss_ui_ref }}
+          SEMOSS_ARTIFACTS_REF: ${{ inputs.semoss_artifacts_ref }}
+          BI_REF: ${{ inputs.bi_ref }}
+          HOTFIX_NAME: ${{ inputs.hotfix_name }}
+        run: |
+          # Function to resolve ref for a repo
+          resolve_ref() {
+            local repo=$1
+            local provided_ref=$2
+            local target_date=$3
+
+            echo "Resolving ref for ${repo}..."
+
+            # Clone repo with full history if date-based lookup needed
+            if [ -z "$provided_ref" ] && [ -n "$target_date" ]; then
+              echo "No ref provided, using date: ${target_date}"
+              git clone --bare "https://github.com/SEMOSS/${repo}.git" "${repo}-bare"
+              cd "${repo}-bare"
+
+              # Find commit closest to target date
+              commit=$(git log --all --until="${target_date} 23:59:59" --format="%H" -n 1)
+              if [ -z "$commit" ]; then
+                echo "ERROR: No commits found before ${target_date} for ${repo}"
+                commit=$(git log --all --format="%H" -n 1)
+                echo "Using latest commit instead: ${commit}"
+              fi
+
+              echo "${commit}"
+              cd ..
+              rm -rf "${repo}-bare"
+            elif [ -n "$provided_ref" ]; then
+              # Verify the ref exists
+              git clone --bare "https://github.com/SEMOSS/${repo}.git" "${repo}-bare"
+              cd "${repo}-bare"
+
+              # Try to resolve the ref to a commit SHA
+              commit=$(git rev-parse "${provided_ref}" 2>/dev/null || echo "")
+              if [ -z "$commit" ]; then
+                echo "ERROR: Could not resolve ref '${provided_ref}' for ${repo}"
+                commit=$(git log --all --format="%H" -n 1)
+                echo "Using latest commit instead: ${commit}"
+              else
+                echo "Resolved ${provided_ref} to ${commit}"
+              fi
+
+              echo "${commit}"
+              cd ..
+              rm -rf "${repo}-bare"
+            else
+              # No ref and no date - use latest from main/dev
+              echo "No ref or date provided, using latest from dev branch"
+              git clone --depth 1 --branch dev "https://github.com/SEMOSS/${repo}.git" "${repo}-temp"
+              cd "${repo}-temp"
+              commit=$(git rev-parse HEAD)
+              echo "Latest dev: ${commit}"
+              cd ..
+              rm -rf "${repo}-temp"
+              echo "${commit}"
+            fi
+          }
+
+          # Resolve each repository
+          RESOLVED_SEMOSS=$(resolve_ref "Semoss" "$SEMOSS_REF" "$TARGET_DATE")
+          RESOLVED_MONOLITH=$(resolve_ref "Monolith" "$MONOLITH_REF" "$TARGET_DATE")
+          RESOLVED_UI=$(resolve_ref "semoss-ui" "$SEMOSS_UI_REF" "$TARGET_DATE")
+          RESOLVED_ARTIFACTS=$(resolve_ref "semoss-artifacts" "$SEMOSS_ARTIFACTS_REF" "$TARGET_DATE")
+          RESOLVED_BI=$(resolve_ref "bi" "$BI_REF" "$TARGET_DATE")
+
+          # Set outputs
+          echo "semoss_ref=${SEMOSS_REF:-${TARGET_DATE:-dev}}" >> $GITHUB_OUTPUT
+          echo "semoss_sha=${RESOLVED_SEMOSS}" >> $GITHUB_OUTPUT
+
+          echo "monolith_ref=${MONOLITH_REF:-${TARGET_DATE:-dev}}" >> $GITHUB_OUTPUT
+          echo "monolith_sha=${RESOLVED_MONOLITH}" >> $GITHUB_OUTPUT
+
+          echo "semoss_ui_ref=${SEMOSS_UI_REF:-${TARGET_DATE:-dev}}" >> $GITHUB_OUTPUT
+          echo "semoss_ui_sha=${RESOLVED_UI}" >> $GITHUB_OUTPUT
+
+          echo "semoss_artifacts_ref=${SEMOSS_ARTIFACTS_REF:-${TARGET_DATE:-dev}}" >> $GITHUB_OUTPUT
+          echo "semoss_artifacts_sha=${RESOLVED_ARTIFACTS}" >> $GITHUB_OUTPUT
+
+          echo "bi_ref=${BI_REF:-${TARGET_DATE:-dev}}" >> $GITHUB_OUTPUT
+          echo "bi_sha=${RESOLVED_BI}" >> $GITHUB_OUTPUT
+
+          # Generate build date and image tag
+          BUILD_DATE=$(date +'%Y-%m-%d')
+          echo "build_date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+
+          # Create hotfix tag
+          HOTFIX_TAG="hotfix-${HOTFIX_NAME}-${BUILD_DATE}"
+          echo "image_tag=${HOTFIX_TAG}" >> $GITHUB_OUTPUT
+
+          # Log summary
+          echo "=== Resolved References ==="
+          echo "Semoss:           ${RESOLVED_SEMOSS:0:8}"
+          echo "Monolith:         ${RESOLVED_MONOLITH:0:8}"
+          echo "semoss-ui:        ${RESOLVED_UI:0:8}"
+          echo "semoss-artifacts: ${RESOLVED_ARTIFACTS:0:8}"
+          echo "bi:               ${RESOLVED_BI:0:8}"
+          echo "Image Tag:        ${HOTFIX_TAG}"
+
+  build-hotfix-image:
+    name: Build Hotfix Docker Image
+    needs: resolve-refs
+    runs-on: self-hosted
+    container:
+      image: quay.io/semoss/test-quay:ubuntu-dind
+
+    steps:
+      - name: Checkout Semoss repository
+        uses: actions/checkout@v4
+        with:
+          repository: SEMOSS/Semoss
+          ref: ${{ needs.resolve-refs.outputs.semoss_sha }}
+          path: semoss-build
+
+      - name: Log in to Quay
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_ROBOT_USERNAME }}
+          password: ${{ secrets.QUAY_ROBOT_PASSWORD }}
+
+      - name: Create hotfix build script
+        env:
+          SEMOSS_SHA: ${{ needs.resolve-refs.outputs.semoss_sha }}
+          MONOLITH_SHA: ${{ needs.resolve-refs.outputs.monolith_sha }}
+          SEMOSS_UI_SHA: ${{ needs.resolve-refs.outputs.semoss_ui_sha }}
+          SEMOSS_ARTIFACTS_SHA: ${{ needs.resolve-refs.outputs.semoss_artifacts_sha }}
+          BI_SHA: ${{ needs.resolve-refs.outputs.bi_sha }}
+        run: |
+          cat > semoss-build/docker/hotfix_build.sh << 'HOTFIX_SCRIPT'
+          #!/bin/bash
+          set -e
+
+          echo "=== Semoss Hotfix Build Script ==="
+          echo "Building with pinned commits:"
+          echo "  Semoss:           ${SEMOSS_SHA:0:8}"
+          echo "  Monolith:         ${MONOLITH_SHA:0:8}"
+          echo "  semoss-ui:        ${SEMOSS_UI_SHA:0:8}"
+          echo "  semoss-artifacts: ${SEMOSS_ARTIFACTS_SHA:0:8}"
+          echo "  bi:               ${BI_SHA:0:8}"
+          echo "=================================="
+
+          # This script will be called from within the Docker build
+          # It replaces update_latest_dev.sh with pinned checkouts
+
+          cd /opt
+
+          # Clone semoss-artifacts at specific commit
+          echo "Cloning semoss-artifacts at ${SEMOSS_ARTIFACTS_SHA}..."
+          git clone https://github.com/SEMOSS/semoss-artifacts
+          cd semoss-artifacts
+          git checkout ${SEMOSS_ARTIFACTS_SHA}
+          cd /opt
+
+          # Clone and build Semoss at specific commit
+          echo "Cloning Semoss at ${SEMOSS_SHA}..."
+          git clone https://github.com/SEMOSS/Semoss
+          cd Semoss
+          git checkout ${SEMOSS_SHA}
+
+          # Clone and build Monolith at specific commit
+          echo "Cloning Monolith at ${MONOLITH_SHA}..."
+          cd /opt
+          git clone https://github.com/SEMOSS/Monolith
+          cd Monolith
+          git checkout ${MONOLITH_SHA}
+
+          # Clone and build semoss-ui at specific commit
+          echo "Cloning semoss-ui at ${SEMOSS_UI_SHA}..."
+          cd /opt
+          git clone https://github.com/SEMOSS/semoss-ui
+          cd semoss-ui
+          git checkout ${SEMOSS_UI_SHA}
+
+          # Clone bi at specific commit
+          echo "Cloning bi at ${BI_SHA}..."
+          cd /opt
+          git clone https://github.com/SEMOSS/bi
+          cd bi
+          git checkout ${BI_SHA}
+
+          # Now run the standard build process from semoss-artifacts
+          # This should build wars/jars and copy to /opt/semosshome
+          cd /opt/semoss-artifacts/artifacts/scripts
+
+          # Call the standard update script's build logic
+          # but it will use our checked-out versions
+          if [ -f ./build_from_source.sh ]; then
+            ./build_from_source.sh
+          else
+            # Fallback: manually trigger maven builds
+            echo "Building Semoss components..."
+            cd /opt/Monolith
+            mvn clean install -DskipTests
+
+            cd /opt/Semoss
+            mvn clean install -DskipTests
+
+            # Copy artifacts to semosshome
+            mkdir -p /opt/semosshome/webapps
+            cp /opt/Monolith/target/*.war /opt/semosshome/webapps/ || true
+            cp /opt/Semoss/target/*.war /opt/semosshome/webapps/ || true
+          fi
+
+          echo "=== Hotfix Build Complete ==="
+          HOTFIX_SCRIPT
+
+          chmod +x semoss-build/docker/hotfix_build.sh
+
+          # Inject the environment variables into the script
+          sed -i "s/\${SEMOSS_SHA}/${SEMOSS_SHA}/g" semoss-build/docker/hotfix_build.sh
+          sed -i "s/\${MONOLITH_SHA}/${MONOLITH_SHA}/g" semoss-build/docker/hotfix_build.sh
+          sed -i "s/\${SEMOSS_UI_SHA}/${SEMOSS_UI_SHA}/g" semoss-build/docker/hotfix_build.sh
+          sed -i "s/\${SEMOSS_ARTIFACTS_SHA}/${SEMOSS_ARTIFACTS_SHA}/g" semoss-build/docker/hotfix_build.sh
+          sed -i "s/\${BI_SHA}/${BI_SHA}/g" semoss-build/docker/hotfix_build.sh
+
+      - name: Create hotfix Dockerfile
+        run: |
+          # Copy the base Dockerfile and modify it
+          cp semoss-build/docker/Dockerfile.ubuntu22.04 semoss-build/docker/Dockerfile.hotfix
+
+          # Replace the update_latest_dev.sh call with our hotfix script
+          sed -i 's|/opt/semoss-artifacts/artifacts/scripts/update_latest_dev.sh|/tmp/hotfix_build.sh|g' semoss-build/docker/Dockerfile.hotfix
+
+          # Add our hotfix script to the image
+          sed -i '/COPY --from=mavenpuller/i COPY hotfix_build.sh /tmp/hotfix_build.sh\nRUN chmod +x /tmp/hotfix_build.sh' semoss-build/docker/Dockerfile.hotfix
+
+          # Add labels for hotfix metadata
+          cat >> semoss-build/docker/Dockerfile.hotfix << EOF
+
+          # Hotfix metadata
+          LABEL hotfix.name="${{ inputs.hotfix_name }}"
+          LABEL hotfix.description="${{ inputs.hotfix_description }}"
+          LABEL hotfix.date="${{ needs.resolve-refs.outputs.build_date }}"
+          LABEL hotfix.semoss.ref="${{ needs.resolve-refs.outputs.semoss_ref }}"
+          LABEL hotfix.semoss.sha="${{ needs.resolve-refs.outputs.semoss_sha }}"
+          LABEL hotfix.monolith.sha="${{ needs.resolve-refs.outputs.monolith_sha }}"
+          LABEL hotfix.semoss-ui.sha="${{ needs.resolve-refs.outputs.semoss_ui_sha }}"
+          LABEL hotfix.semoss-artifacts.sha="${{ needs.resolve-refs.outputs.semoss_artifacts_sha }}"
+          LABEL hotfix.bi.sha="${{ needs.resolve-refs.outputs.bi_sha }}"
+          EOF
+
+      - name: Build hotfix image
+        env:
+          IMAGE_TAG: ${{ needs.resolve-refs.outputs.image_tag }}
+          USE_CACHE: ${{ inputs.use_cache }}
+        run: |
+          cd semoss-build/docker
+
+          CACHE_FLAG="--no-cache"
+          if [ "$USE_CACHE" = "true" ]; then
+            CACHE_FLAG=""
+          fi
+
+          docker build $CACHE_FLAG \
+            -f Dockerfile.hotfix \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${IMAGE_TAG} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ inputs.hotfix_name }}-latest \
+            --build-arg SEMOSS_VERSION=${{ vars.VERSION }}-HOTFIX \
+            .
+
+      - name: Push hotfix image
+        if: ${{ inputs.push_to_registry }}
+        env:
+          IMAGE_TAG: ${{ needs.resolve-refs.outputs.image_tag }}
+        run: |
+          echo "Pushing image: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${IMAGE_TAG}"
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${IMAGE_TAG}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ inputs.hotfix_name }}-latest
+
+          echo "=== Hotfix Image Built and Pushed ==="
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${IMAGE_TAG}"
+          echo "Latest: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ inputs.hotfix_name }}-latest"
+
+      - name: Generate hotfix manifest
+        env:
+          IMAGE_TAG: ${{ needs.resolve-refs.outputs.image_tag }}
+        run: |
+          cat > hotfix-manifest.json << EOF
+          {
+            "hotfix_name": "${{ inputs.hotfix_name }}",
+            "hotfix_description": "${{ inputs.hotfix_description }}",
+            "build_date": "${{ needs.resolve-refs.outputs.build_date }}",
+            "image_tag": "${IMAGE_TAG}",
+            "image_uri": "${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${IMAGE_TAG}",
+            "repositories": {
+              "Semoss": {
+                "ref": "${{ needs.resolve-refs.outputs.semoss_ref }}",
+                "sha": "${{ needs.resolve-refs.outputs.semoss_sha }}"
+              },
+              "Monolith": {
+                "ref": "${{ needs.resolve-refs.outputs.monolith_ref }}",
+                "sha": "${{ needs.resolve-refs.outputs.monolith_sha }}"
+              },
+              "semoss-ui": {
+                "ref": "${{ needs.resolve-refs.outputs.semoss_ui_ref }}",
+                "sha": "${{ needs.resolve-refs.outputs.semoss_ui_sha }}"
+              },
+              "semoss-artifacts": {
+                "ref": "${{ needs.resolve-refs.outputs.semoss_artifacts_ref }}",
+                "sha": "${{ needs.resolve-refs.outputs.semoss_artifacts_sha }}"
+              },
+              "bi": {
+                "ref": "${{ needs.resolve-refs.outputs.bi_ref }}",
+                "sha": "${{ needs.resolve-refs.outputs.bi_sha }}"
+              }
+            }
+          }
+          EOF
+
+          echo "=== Hotfix Manifest ==="
+          cat hotfix-manifest.json
+
+      - name: Upload hotfix manifest
+        uses: actions/upload-artifact@v3
+        with:
+          name: hotfix-manifest-${{ inputs.hotfix_name }}
+          path: hotfix-manifest.json
+
+  summary:
+    name: Build Summary
+    needs: [resolve-refs, build-hotfix-image]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Display build summary
+        run: |
+          echo "# Hotfix Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Hotfix: ${{ inputs.hotfix_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "${{ inputs.hotfix_description }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ needs.resolve-refs.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest**: ${{ inputs.hotfix_name }}-latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Repository Commits" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | Ref/Date | Commit SHA |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|----------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Semoss | ${{ needs.resolve-refs.outputs.semoss_ref }} | \`${{ needs.resolve-refs.outputs.semoss_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Monolith | ${{ needs.resolve-refs.outputs.monolith_ref }} | \`${{ needs.resolve-refs.outputs.monolith_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| semoss-ui | ${{ needs.resolve-refs.outputs.semoss_ui_ref }} | \`${{ needs.resolve-refs.outputs.semoss_ui_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| semoss-artifacts | ${{ needs.resolve-refs.outputs.semoss_artifacts_ref }} | \`${{ needs.resolve-refs.outputs.semoss_artifacts_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| bi | ${{ needs.resolve-refs.outputs.bi_ref }} | \`${{ needs.resolve-refs.outputs.bi_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Pull Command" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}:${{ needs.resolve-refs.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
