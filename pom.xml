@@ -2828,6 +2828,18 @@
 				</exclusion>
 			</exclusions>
 		</dependency>
+		<!-- https://mvnrepository.com/artifact/com.hierynomus/smbj -->
+		<dependency>
+			<groupId>com.hierynomus</groupId>
+			<artifactId>smbj</artifactId>
+			<version>0.14.0</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.slf4j</groupId>
+					<artifactId>slf4j-api</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
 		<!-- https://mvnrepository.com/artifact/org.reactivestreams/reactive-streams -->
 		<dependency>
 			<groupId>org.reactivestreams</groupId>

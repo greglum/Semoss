@@ -38,6 +38,7 @@ import prerna.engine.impl.storage.LocalFileSystemStorageEngine;
 import prerna.engine.impl.storage.MinioStorageEngine;
 import prerna.engine.impl.storage.S3StorageEngine;
 import prerna.engine.impl.storage.SFTPStorageEngine;
+import prerna.engine.impl.storage.SmbStorageEngine;
 
 public enum StorageTypeEnum {
 
@@ -53,7 +54,7 @@ public enum StorageTypeEnum {
 	MICROSOFT_AZURE_NATIVE_BLOB_STORAGE("MICROSOFT_AZURE_NATIVE_BLOB_STORAGE", AzureNativeBlobStorageEngine.class.getName()),
 	MINIO("MINIO", MinioStorageEngine.class.getName()),
 	SFTP("SFTP", SFTPStorageEngine.class.getName()),
-	SMB_CIFS("SMB_CIFS", JCIFSStorageEngine.class.getName());
+	SMB_CIFS("SMB_CIFS", SmbStorageEngine.class.getName());
 
 	private String storageName;
 	private String storageClass;
