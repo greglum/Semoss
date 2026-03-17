@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  samba:
+    image: dperson/samba:latest
+    container_name: semoss-smb-test
+    ports:
+      - "139:139"
+      - "445:445"
+    environment:
+      # Create a test user: username:password:userid:group
+      - USER=testuser;testpass
+      # Create a share: name;path;browse;readonly;guest;users;admins;writelist;comment
+      - SHARE=testshare;/mount;yes;no;no;testuser;testuser
+      # Set workgroup
+      - WORKGROUP=WORKGROUP
+      # Enable timestamps
+      - TZ=America/New_York
+    volumes:
+      # Mount a local directory for testing
+      - ./test-data/smb-mount:/mount
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    networks:
+      - smb-test
+
+networks:
+  smb-test:
+    driver: bridge
+
+# Usage:
+# 1. Start: docker-compose -f docker-compose.smb-test.yml up -d
+# 2. Stop:  docker-compose -f docker-compose.smb-test.yml down
+# 3. Logs:  docker-compose -f docker-compose.smb-test.yml logs -f
+#
+# Connection details:
+#   Host: localhost (or 127.0.0.1)
+#   Port: 445
+#   Share: testshare
+#   Username: testuser
+#   Password: testpass
+#   Domain: WORKGROUP (or leave empty)
+#
+# SMB path: smb://testuser:testpass@localhost/testshare
