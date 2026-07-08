@@ -33,6 +33,11 @@ output "cluster_oidc_provider_arn" {
   value       = try(aws_iam_openid_connect_provider.this[0].arn, null)
 }
 
+output "aws_load_balancer_controller_role_arn" {
+  description = "IAM role ARN used by the AWS Load Balancer Controller when enabled."
+  value       = try(aws_iam_role.aws_load_balancer_controller[0].arn, null)
+}
+
 output "cluster_role_arn" {
   description = "IAM role ARN used by the EKS cluster."
   value       = local.effective_cluster_role_arn

@@ -4,6 +4,10 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
 
+data "aws_eks_cluster_auth" "this" {
+  name = aws_eks_cluster.this.name
+}
+
 data "aws_vpc" "selected" {
   id = var.vpc_id
 }
@@ -30,17 +34,332 @@ data "aws_iam_policy_document" "node_assume_role" {
   }
 }
 
+data "aws_iam_policy_document" "aws_load_balancer_controller_assume_role" {
+  count = local.install_aws_load_balancer_controller_iam ? 1 : 0
+
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.this[0].arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.this[0].url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.this[0].url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:${var.aws_load_balancer_controller_namespace}:${var.aws_load_balancer_controller_service_account_name}"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "aws_load_balancer_controller" {
+  count = local.install_aws_load_balancer_controller_iam ? 1 : 0
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:CreateServiceLinkedRole",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values   = ["elasticloadbalancing.amazonaws.com"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeAccountAttributes",
+      "ec2:DescribeAddresses",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeVpcPeeringConnections",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeTags",
+      "ec2:GetCoipPoolUsage",
+      "ec2:DescribeCoipPools",
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeLoadBalancerAttributes",
+      "elasticloadbalancing:DescribeListeners",
+      "elasticloadbalancing:DescribeListenerCertificates",
+      "elasticloadbalancing:DescribeSSLPolicies",
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeTargetGroupAttributes",
+      "elasticloadbalancing:DescribeTargetHealth",
+      "elasticloadbalancing:DescribeTags",
+      "elasticloadbalancing:DescribeTrustStores",
+      "elasticloadbalancing:DescribeListenerAttributes",
+      "elasticloadbalancing:DescribeCapacityReservation",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "cognito-idp:DescribeUserPoolClient",
+      "acm:ListCertificates",
+      "acm:DescribeCertificate",
+      "iam:ListServerCertificates",
+      "iam:GetServerCertificate",
+      "waf-regional:GetWebACL",
+      "waf-regional:GetWebACLForResource",
+      "waf-regional:AssociateWebACL",
+      "waf-regional:DisassociateWebACL",
+      "wafv2:GetWebACL",
+      "wafv2:GetWebACLForResource",
+      "wafv2:AssociateWebACL",
+      "wafv2:DisassociateWebACL",
+      "shield:GetSubscriptionState",
+      "shield:DescribeProtection",
+      "shield:CreateProtection",
+      "shield:DeleteProtection",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:CreateSecurityGroup",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:CreateTags",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:ec2:*:*:security-group/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:CreateAction"
+      values   = ["CreateSecurityGroup"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "aws:RequestTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:CreateTags",
+      "ec2:DeleteTags",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:ec2:*:*:security-group/*"]
+
+    condition {
+      test     = "Null"
+      variable = "aws:RequestTag/elbv2.k8s.aws/cluster"
+      values   = ["true"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:DeleteSecurityGroup",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:CreateLoadBalancer",
+      "elasticloadbalancing:CreateTargetGroup",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "Null"
+      variable = "aws:RequestTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:CreateListener",
+      "elasticloadbalancing:DeleteListener",
+      "elasticloadbalancing:CreateRule",
+      "elasticloadbalancing:DeleteRule",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:RemoveTags",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:targetgroup/*/*",
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:loadbalancer/app/*/*",
+    ]
+
+    condition {
+      test     = "Null"
+      variable = "aws:RequestTag/elbv2.k8s.aws/cluster"
+      values   = ["true"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:RemoveTags",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:listener/net/*/*/*",
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:listener/app/*/*/*",
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:listener-rule/net/*/*/*",
+      "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:listener-rule/app/*/*/*",
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:ModifyLoadBalancerAttributes",
+      "elasticloadbalancing:SetIpAddressType",
+      "elasticloadbalancing:SetSecurityGroups",
+      "elasticloadbalancing:SetSubnets",
+      "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:ModifyTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:DeleteTargetGroup",
+      "elasticloadbalancing:ModifyListenerAttributes",
+      "elasticloadbalancing:ModifyCapacityReservation",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "Null"
+      variable = "aws:ResourceTag/elbv2.k8s.aws/cluster"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:RegisterTargets",
+      "elasticloadbalancing:DeregisterTargets",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:targetgroup/*/*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:SetWebAcl",
+      "elasticloadbalancing:ModifyListener",
+      "elasticloadbalancing:AddListenerCertificates",
+      "elasticloadbalancing:RemoveListenerCertificates",
+      "elasticloadbalancing:ModifyRule",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeTags",
+      "ec2:GetSecurityGroupsForVpc",
+      "ec2:DescribeIpamPools",
+      "ec2:AllocateIpamPoolCidr",
+      "ec2:ReleaseIpamPoolAllocation",
+    ]
+    resources = ["*"]
+  }
+}
+
 locals {
-  tags                         = merge({ Name = var.cluster_name }, var.tags)
-  addon_names                  = var.enable_cluster_addons ? toset([for addon in var.cluster_addon_names : addon if lower(addon) != "coredns"]) : toset([])
-  node_all_tags                = merge(local.tags, var.node_group_tags)
-  effective_encryption_key_arn = coalesce(var.cluster_encryption_key_arn, try(aws_kms_key.cluster_encryption[0].arn, null))
-  bucket_name_base             = coalesce(var.bucket_name, "${lower(replace(var.cluster_name, "/[^a-z0-9-]/", "-"))}-app-files-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.name}")
-  bucket_name                  = trim(local.bucket_name_base, "-")
-  create_cluster_role          = var.cluster_iam_role_arn == null
-  effective_cluster_role_arn   = var.cluster_iam_role_arn != null ? var.cluster_iam_role_arn : aws_iam_role.cluster[0].arn
-  create_node_role             = var.node_iam_role_arn == null
-  effective_node_role_arn      = var.node_iam_role_arn != null ? var.node_iam_role_arn : aws_iam_role.node[0].arn
+  tags                                      = merge({ Name = var.cluster_name }, var.tags)
+  addon_names                               = var.enable_cluster_addons ? toset([for addon in var.cluster_addon_names : addon if lower(addon) != "coredns"]) : toset([])
+  node_all_tags                             = merge(local.tags, var.node_group_tags)
+  use_node_launch_template                  = var.node_ami_image_id != null || var.node_volume_kms_key_arn != null
+  effective_node_ssh_key_name               = var.node_ssh_key_name != null ? var.node_ssh_key_name : (length(aws_key_pair.node_ssh) > 0 ? aws_key_pair.node_ssh[0].key_name : null)
+  effective_encryption_key_arn              = coalesce(var.cluster_encryption_key_arn, try(aws_kms_key.cluster_encryption[0].arn, null))
+  effective_cluster_sg_ingress_cidr_ipv4    = coalesce(var.cluster_security_group_ingress_cidr_ipv4, data.aws_vpc.selected.cidr_block)
+  sanitized_cluster_name                    = trim(replace(replace(lower(var.cluster_name), "/[^a-z0-9-]/", "-"), "/-+/", "-"), "-")
+  bucket_name                               = coalesce(var.bucket_name, "${local.sanitized_cluster_name}-bucket")
+  create_cluster_role                       = var.cluster_iam_role_arn == null
+  effective_cluster_role_arn                = var.cluster_iam_role_arn != null ? var.cluster_iam_role_arn : aws_iam_role.cluster[0].arn
+  create_node_role                          = var.node_iam_role_arn == null
+  effective_node_role_arn                   = var.node_iam_role_arn != null ? var.node_iam_role_arn : aws_iam_role.node[0].arn
+  install_aws_load_balancer_controller_iam  = var.enable_aws_load_balancer_controller && var.enable_irsa
+  install_aws_load_balancer_controller_helm = var.enable_aws_load_balancer_controller_helm && local.install_aws_load_balancer_controller_iam
+}
+
+resource "aws_key_pair" "node_ssh" {
+  count = var.node_ssh_public_key != null ? 1 : 0
+
+  key_name_prefix = "${var.cluster_name}-${var.node_group_name}-"
+  public_key      = trimspace(var.node_ssh_public_key)
+  tags            = local.node_all_tags
+}
+
+provider "helm" {
+  kubernetes = {
+    host                   = aws_eks_cluster.this.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.this.token
+  }
 }
 
 resource "aws_s3_bucket" "platform_files" {
@@ -234,6 +553,17 @@ resource "aws_eks_cluster" "this" {
   ]
 }
 
+resource "aws_vpc_security_group_ingress_rule" "cluster_api_from_cidr" {
+  count = var.manage_cluster_security_group_ingress_rule ? 1 : 0
+
+  security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  description       = "Allow TCP ${var.cluster_security_group_ingress_port} from configured CIDR"
+  cidr_ipv4         = local.effective_cluster_sg_ingress_cidr_ipv4
+  from_port         = var.cluster_security_group_ingress_port
+  ip_protocol       = "tcp"
+  to_port           = var.cluster_security_group_ingress_port
+}
+
 resource "aws_eks_addon" "managed" {
   for_each = local.addon_names
 
@@ -245,10 +575,26 @@ resource "aws_eks_addon" "managed" {
 }
 
 resource "aws_launch_template" "node_custom_ami" {
-  count = var.node_ami_image_id == null ? 0 : 1
+  count = local.use_node_launch_template ? 1 : 0
 
   name_prefix = "${var.cluster_name}-${var.node_group_name}-"
   image_id    = var.node_ami_image_id
+  key_name    = local.effective_node_ssh_key_name
+
+  dynamic "block_device_mappings" {
+    for_each = var.node_volume_kms_key_arn == null ? [] : [1]
+
+    content {
+      device_name = "/dev/xvda"
+
+      ebs {
+        encrypted   = true
+        kms_key_id  = var.node_volume_kms_key_arn
+        volume_size = var.node_disk_size
+        volume_type = "gp3"
+      }
+    }
+  }
 
   tag_specifications {
     resource_type = "instance"
@@ -264,18 +610,27 @@ resource "aws_eks_node_group" "this" {
   node_role_arn        = local.effective_node_role_arn
   subnet_ids           = var.subnet_ids
   capacity_type        = var.node_capacity_type
-  disk_size            = var.node_ami_image_id == null ? var.node_disk_size : null
+  disk_size            = local.use_node_launch_template ? null : var.node_disk_size
   instance_types       = var.node_instance_types
-  ami_type             = var.node_ami_image_id == null ? var.node_ami_type : null
+  ami_type             = local.use_node_launch_template ? null : var.node_ami_type
   force_update_version = true
   tags                 = local.node_all_tags
 
   dynamic "launch_template" {
-    for_each = var.node_ami_image_id == null ? [] : [aws_launch_template.node_custom_ami[0]]
+    for_each = local.use_node_launch_template ? [aws_launch_template.node_custom_ami[0]] : []
 
     content {
       id      = launch_template.value.id
       version = tostring(launch_template.value.latest_version)
+    }
+  }
+
+  dynamic "remote_access" {
+    for_each = (!local.use_node_launch_template && local.effective_node_ssh_key_name != null) ? [1] : []
+
+    content {
+      ec2_ssh_key               = local.effective_node_ssh_key_name
+      source_security_group_ids = length(var.node_ssh_source_security_group_ids) > 0 ? var.node_ssh_source_security_group_ids : null
     }
   }
 
@@ -302,6 +657,7 @@ resource "aws_eks_node_group" "this" {
   }
 
   depends_on = [
+    aws_key_pair.node_ssh,
     aws_iam_role_policy_attachment.node_worker,
     aws_iam_role_policy_attachment.node_cni,
     aws_iam_role_policy_attachment.node_ecr_readonly,
@@ -345,4 +701,70 @@ resource "aws_iam_openid_connect_provider" "this" {
   thumbprint_list = [data.tls_certificate.oidc[0].certificates[0].sha1_fingerprint]
   url             = aws_eks_cluster.this.identity[0].oidc[0].issuer
   tags            = local.tags
+}
+
+resource "aws_iam_role" "aws_load_balancer_controller" {
+  count = local.install_aws_load_balancer_controller_iam ? 1 : 0
+
+  name               = "${var.cluster_name}-aws-load-balancer-controller"
+  assume_role_policy = data.aws_iam_policy_document.aws_load_balancer_controller_assume_role[0].json
+  tags               = local.tags
+}
+
+resource "aws_iam_policy" "aws_load_balancer_controller" {
+  count = local.install_aws_load_balancer_controller_iam ? 1 : 0
+
+  name   = "${var.cluster_name}-AWSLoadBalancerController"
+  policy = data.aws_iam_policy_document.aws_load_balancer_controller[0].json
+  tags   = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "aws_load_balancer_controller" {
+  count = local.install_aws_load_balancer_controller_iam ? 1 : 0
+
+  role       = aws_iam_role.aws_load_balancer_controller[0].name
+  policy_arn = aws_iam_policy.aws_load_balancer_controller[0].arn
+}
+
+resource "helm_release" "aws_load_balancer_controller" {
+  count = local.install_aws_load_balancer_controller_helm ? 1 : 0
+
+  name             = "aws-load-balancer-controller"
+  namespace        = var.aws_load_balancer_controller_namespace
+  repository       = "https://aws.github.io/eks-charts"
+  chart            = "aws-load-balancer-controller"
+  version          = var.aws_load_balancer_controller_chart_version
+  create_namespace = false
+
+  set = [
+    {
+      name  = "clusterName"
+      value = aws_eks_cluster.this.name
+    },
+    {
+      name  = "serviceAccount.create"
+      value = "true"
+    },
+    {
+      name  = "serviceAccount.name"
+      value = var.aws_load_balancer_controller_service_account_name
+    },
+    {
+      name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
+      value = aws_iam_role.aws_load_balancer_controller[0].arn
+    },
+    {
+      name  = "region"
+      value = data.aws_region.current.region
+    },
+    {
+      name  = "vpcId"
+      value = data.aws_vpc.selected.id
+    },
+  ]
+
+  depends_on = [
+    aws_eks_node_group.this,
+    aws_iam_role_policy_attachment.aws_load_balancer_controller,
+  ]
 }

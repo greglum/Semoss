@@ -37,6 +37,34 @@ variable "cluster_endpoint_public_access_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "cluster_security_group_ingress_port" {
+  description = "TCP port to allow into the EKS cluster security group from cluster_security_group_ingress_cidr_ipv4."
+  type        = number
+  default     = 8443
+
+  validation {
+    condition     = var.cluster_security_group_ingress_port >= 1 && var.cluster_security_group_ingress_port <= 65535
+    error_message = "cluster_security_group_ingress_port must be between 1 and 65535."
+  }
+}
+
+variable "cluster_security_group_ingress_cidr_ipv4" {
+  description = "IPv4 CIDR allowed into the EKS cluster security group on cluster_security_group_ingress_port. When null, uses the VPC CIDR block."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.cluster_security_group_ingress_cidr_ipv4 == null || can(cidrhost(var.cluster_security_group_ingress_cidr_ipv4, 0))
+    error_message = "cluster_security_group_ingress_cidr_ipv4 must be a valid IPv4 CIDR block or null."
+  }
+}
+
+variable "manage_cluster_security_group_ingress_rule" {
+  description = "Whether this module should create the EKS cluster security group ingress rule. Set false when the rule already exists outside Terraform management."
+  type        = bool
+  default     = false
+}
+
 variable "cluster_log_types" {
   description = "Control plane log types to enable."
   type        = list(string)
@@ -85,7 +113,7 @@ variable "create_bucket" {
 }
 
 variable "bucket_name" {
-  description = "Optional name for the application files S3 bucket. If null, a name is generated from cluster name, account ID, and region."
+  description = "Optional name for the application files S3 bucket. If null, a name is generated from the cluster name with a -bucket suffix."
   type        = string
   default     = null
 }
@@ -142,10 +170,49 @@ variable "node_ami_image_id" {
   }
 }
 
+variable "node_ssh_key_name" {
+  description = "Name of an existing EC2 key pair to enable SSH access to worker nodes. If null and node_ssh_public_key is provided, the module creates a key pair."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = !(var.node_ssh_key_name != null && var.node_ssh_public_key != null)
+    error_message = "Set either node_ssh_key_name or node_ssh_public_key, but not both."
+  }
+}
+
+variable "node_ssh_public_key" {
+  description = "Public key material used to create a new EC2 key pair for worker node SSH access. Ignored when node_ssh_key_name is set."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.node_ssh_public_key == null || length(trimspace(var.node_ssh_public_key)) > 0
+    error_message = "node_ssh_public_key must be null or a non-empty SSH public key string."
+  }
+}
+
+variable "node_ssh_source_security_group_ids" {
+  description = "Security group IDs allowed to SSH to worker nodes when remote access is enabled and no launch template is used."
+  type        = list(string)
+  default     = []
+}
+
 variable "node_disk_size" {
   description = "Root disk size in GiB for worker nodes."
   type        = number
   default     = 50
+}
+
+variable "node_volume_kms_key_arn" {
+  description = "Optional KMS key ARN used to encrypt worker node EBS root volumes."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.node_volume_kms_key_arn == null || can(regex("^arn:[^:]+:kms:[^:]+:[0-9]{12}:(key|alias)/.+$", var.node_volume_kms_key_arn))
+    error_message = "node_volume_kms_key_arn must be a valid KMS key or alias ARN, or null."
+  }
 }
 
 variable "node_desired_size" {
@@ -215,6 +282,41 @@ variable "enable_irsa" {
   description = "Whether to create an OIDC provider for IAM roles for service accounts."
   type        = bool
   default     = true
+}
+
+variable "enable_aws_load_balancer_controller" {
+  description = "Whether to create IAM resources for the AWS Load Balancer Controller via the EKS module. Requires enable_irsa=true."
+  type        = bool
+  default     = false
+}
+
+variable "enable_aws_load_balancer_controller_helm" {
+  description = "Whether to install the AWS Load Balancer Controller Helm release via Terraform. Keep false when Helm is managed in CodeBuild."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.enable_aws_load_balancer_controller_helm || (var.enable_aws_load_balancer_controller && var.enable_irsa)
+    error_message = "enable_aws_load_balancer_controller_helm requires enable_aws_load_balancer_controller=true and enable_irsa=true."
+  }
+}
+
+variable "aws_load_balancer_controller_namespace" {
+  description = "Namespace where the AWS Load Balancer Controller is installed."
+  type        = string
+  default     = "kube-system"
+}
+
+variable "aws_load_balancer_controller_service_account_name" {
+  description = "Service account name used by the AWS Load Balancer Controller."
+  type        = string
+  default     = "aws-load-balancer-controller"
+}
+
+variable "aws_load_balancer_controller_chart_version" {
+  description = "Helm chart version for the AWS Load Balancer Controller."
+  type        = string
+  default     = "1.13.0"
 }
 
 variable "tags" {

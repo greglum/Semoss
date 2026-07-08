@@ -60,6 +60,12 @@ variable "cluster_encryption_key_arn" {
   default     = null
 }
 
+variable "enable_aws_load_balancer_controller" {
+  description = "Whether to install the AWS Load Balancer Controller using the module-managed IRSA role."
+  type        = bool
+  default     = true
+}
+
 variable "node_instance_types" {
   description = "Instance types for the managed node group."
   type        = list(string)

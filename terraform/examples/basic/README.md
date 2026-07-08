@@ -10,6 +10,7 @@ Before you apply this example, make sure you have:
 - An existing VPC and at least two subnets for the cluster and node group
 - IAM permissions to create and manage EKS, IAM, EC2, and OIDC resources
 - A decision on cluster endpoint access: private, public, or both
+- Subnet tags compatible with AWS Load Balancer Controller if you enable it
 - Optional admin principal ARNs if you want EKS access entries created
 - Optional KMS key ARN if you want Kubernetes secrets encrypted at rest
 - Optional decision on whether worker nodes should have SSM access
@@ -32,6 +33,7 @@ module "eks" {
   cluster_endpoint_private_access      = var.cluster_endpoint_private_access
   cluster_endpoint_public_access       = var.cluster_endpoint_public_access
   cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
+  enable_aws_load_balancer_controller  = var.enable_aws_load_balancer_controller
 
   node_instance_types = var.node_instance_types
   node_desired_size   = var.node_desired_size
@@ -47,6 +49,17 @@ If you are using this module from another repo, replace the local source with a 
 ## Variables
 
 See `variables.tf` for the full set of example inputs.
+
+## AWS Load Balancer Controller
+
+This example enables the AWS Load Balancer Controller by default.
+The module creates the IRSA role and installs the controller Helm chart into `kube-system`.
+
+Make sure the subnets used by the cluster are tagged for load balancer discovery before you apply:
+
+- Public ALBs: `kubernetes.io/role/elb = 1`
+- Internal ALBs: `kubernetes.io/role/internal-elb = 1`
+- Cluster discovery: `kubernetes.io/cluster/<cluster-name> = shared` or `owned`
 
 ## Local tfvars setup
 
